@@ -563,7 +563,7 @@ function getSessionId(){
   let sid = null;
   try{ sid = localStorage.getItem('asfour_session_id'); }catch(e){}
   if (!sid){
-    sid = 'instance-ai-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    sid = 'instance-ai-' + Date.now();
     try{ localStorage.setItem('asfour_session_id', sid); }catch(e){}
   }
   return sid;
@@ -677,8 +677,8 @@ async function sendMessage(){
   const displayText = attachedFile ? `${text ? text + '\n' : ''}📎 ${attachedFile.name}` : text;
   addMessage(displayText, 'user');
 
-  const payload = { message: text, timestamp: new Date().toISOString() };
-  if (attachedFile) payload.attachment = { name: attachedFile.name, type: attachedFile.type, data: attachedFile.dataUrl };
+const payload = { message: text, timestamp: new Date().toISOString(), sessionId: getSessionId() };
+   if (attachedFile) payload.attachment = { name: attachedFile.name, type: attachedFile.type, data: attachedFile.dataUrl };
 
   chatInput.value = '';
   autoGrow();
