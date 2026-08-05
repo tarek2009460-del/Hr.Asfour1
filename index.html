@@ -557,7 +557,17 @@ html[data-theme="dark"] .hr-main{ color: #eaf1fb; }
 
 // 1) Replace with your live n8n webhook if this ever changes.
 const webhookURL = "https://hrtarek.app.n8n.cloud/webhook/08d0e0ed-8278-4840-8a07-e244ecb9ae83/chat";
+const voiceWebhookURL = "https://hrtarek.app.n8n.cloud/webhook/voice-chat";
 
+function getSessionId(){
+  let sid = null;
+  try{ sid = localStorage.getItem('asfour_session_id'); }catch(e){}
+  if (!sid){
+    sid = 'instance-ai-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    try{ localStorage.setItem('asfour_session_id', sid); }catch(e){}
+  }
+  return sid;
+}
 /* ---------------------------------------------------------
    THEME (light / dark) with sun/moon animation
 --------------------------------------------------------- */
@@ -755,14 +765,19 @@ function renderAttachmentChip(){
 }
 
 /* ---------------------------------------------------------
-   VOICE RECORDING (UI-level: timer + pulsing state, no
-   real transcription — sends a voice-note marker on stop)
+/* ---------------------------------------------------------
+   VOICE RECORDING (REAL) — records actual mic audio,
+   sends it as multipart/form-data to the Voice Webhook,
+   and shows the real bot reply back.
 --------------------------------------------------------- */
 const recordingBadge = document.getElementById('recordingBadge');
 const recTimerEl = document.getElementById('recTimer');
 let isRecording = false;
 let recStart = null;
 let recInterval = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let mediaStreamRef = null;
 
 function formatElapsed(ms){
   const totalSec = Math.floor(ms / 1000);
@@ -775,30 +790,90 @@ micBtn.addEventListener('click', () => {
   isRecording ? stopRecording() : startRecording();
 });
 
-function startRecording(){
-  isRecording = true;
-  recStart = Date.now();
-  micBtn.classList.add('recording');
-  recordingBadge.classList.add('show');
-  recTimerEl.textContent = '0:00';
-  recInterval = setInterval(() => {
-    recTimerEl.textContent = formatElapsed(Date.now() - recStart);
-  }, 250);
+async function startRecording(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    addMessage('التسجيل الصوتي غير مدعوم في هذا المتصفح.', 'bot');
+    return;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStreamRef = stream;
+
+    const preferredTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+    const supportedType = preferredTypes.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t));
+
+    mediaRecorder = supportedType ? new MediaRecorder(stream, { mimeType: supportedType }) : new MediaRecorder(stream);
+    recordedChunks = [];
+
+    mediaRecorder.addEventListener('dataavailable', (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    });
+
+    mediaRecorder.addEventListener('stop', () => {
+      if (mediaStreamRef) mediaStreamRef.getTracks().forEach(t => t.stop());
+      handleRecordingStopped();
+    });
+
+    mediaRecorder.start();
+    isRecording = true;
+    recStart = Date.now();
+    micBtn.classList.add('recording');
+    recordingBadge.classList.add('show');
+    recTimerEl.textContent = '0:00';
+    recInterval = setInterval(() => {
+      recTimerEl.textContent = formatElapsed(Date.now() - recStart);
+    }, 250);
+  }catch(err){
+    addMessage('محتاج إذن استخدام الميكروفون عشان تقدر تبعت رسالة صوتية.', 'bot');
+  }
 }
 
 function stopRecording(){
+  if (!isRecording || !mediaRecorder) return;
   isRecording = false;
   micBtn.classList.remove('recording');
   recordingBadge.classList.remove('show');
   clearInterval(recInterval);
-  const duration = formatElapsed(Date.now() - recStart);
-  if (Date.now() - recStart > 600){ // ignore accidental taps
-    addMessage(`🎙️ رسالة صوتية (${duration})`, 'user');
-    setTyping(true);
-    setTimeout(() => {
-      setTyping(false);
-      addMessage('استلمت الرسالة الصوتية. (الرد الفعلي على الصوت هيتم ضبطه من خلال n8n لاحقاً)', 'bot');
-    }, 900);
+  mediaRecorder.stop();
+}
+
+function handleRecordingStopped(){
+  const elapsedMs = Date.now() - recStart;
+  if (elapsedMs <= 600 || recordedChunks.length === 0) return;
+
+  const duration = formatElapsed(elapsedMs);
+  const mimeType = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+  const blob = new Blob(recordedChunks, { type: mimeType });
+  const extension = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+  const fileName = `voice-note-${Date.now()}.${extension}`;
+
+  addMessage(`🎙️ رسالة صوتية (${duration})`, 'user');
+  sendVoiceMessage({ name: fileName, blob });
+}
+
+async function sendVoiceMessage(voiceFile){
+  const formData = new FormData();
+  formData.append('data', voiceFile.blob, voiceFile.name);
+  formData.append('sessionId', getSessionId());
+
+  setTyping(true);
+  try{
+    const res = await fetch(voiceWebhookURL, { method: 'POST', body: formData });
+
+    let replyText = 'تم استلام رسالتك الصوتية.';
+    try{
+      const data = await res.json();
+      replyText = extractReply(data) || replyText;
+    }catch(parseErr){
+      const raw = await res.text().catch(() => '');
+      if (raw) replyText = raw;
+    }
+
+    setTyping(false);
+    addMessage(replyText, 'bot');
+  }catch(err){
+    setTyping(false);
+    addMessage('تعذر إرسال الرسالة الصوتية حالياً. برجاء المحاولة مرة أخرى لاحقاً.', 'bot');
   }
 }
 
